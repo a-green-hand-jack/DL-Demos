@@ -136,6 +136,7 @@ if __name__ == '__main__':
           ckpt_path=model_path)
 
     net.load_state_dict(torch.load(model_path))
+    # Here, we can find that the DDIM has the same training methode with DDPM
     ddim = DDIM(device, n_steps)
     sample_imgs(ddpm,
                 net,

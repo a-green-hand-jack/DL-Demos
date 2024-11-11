@@ -30,13 +30,18 @@ def train(ddpm: DDPM, net, device='cuda', ckpt_path='dldemos/ddpm/model.pth'):
         total_loss = 0
 
         for x, _ in dataloader:
+            # This x is the x_0 in paper, which is the original image
             current_batch_size = x.shape[0]
             x = x.to(device)
             t = torch.randint(0, n_steps, (current_batch_size, )).to(device)
-            eps = torch.randn_like(x).to(device)
+            eps = torch.randn_like(x).to(device)    # This eps is the z in paper, which is a totally noise image
             x_t = ddpm.sample_forward(x, t, eps)
+            # The DDPM's forward funcation definate a method which means a way to add a special noise, deppending on t, to the original image
             eps_theta = net(x_t, t.reshape(current_batch_size, 1))
             loss = loss_fn(eps_theta, eps)
+            # Here we just hope the net can denosie the noise we just add to the original image
+            # While, we can find an interinsting thing that though we definate the x_{t-1} ~= \mu_{\theta}(x_t, t), we indeedly don't use it! 
+            # Insteedly, what we truly optimize is z ~= \mu{\theta}(x_t, t). Such transformation depends on : x_{t-1}=\frac{1}{\alpha_1}(x_t - \beta_t\epsllion_t)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
