@@ -6,7 +6,6 @@ from .dataset import get_img_shape
 
 
 class PositionalEncoding(nn.Module):
-
     def __init__(self, max_seq_len: int, d_model: int):
         super().__init__()
 
@@ -17,8 +16,8 @@ class PositionalEncoding(nn.Module):
         i_seq = torch.linspace(0, max_seq_len - 1, max_seq_len)
         j_seq = torch.linspace(0, d_model - 2, d_model // 2)
         pos, two_i = torch.meshgrid(i_seq, j_seq)
-        pe_2i = torch.sin(pos / 10000**(two_i / d_model))
-        pe_2i_1 = torch.cos(pos / 10000**(two_i / d_model))
+        pe_2i = torch.sin(pos / 10000 ** (two_i / d_model))
+        pe_2i_1 = torch.cos(pos / 10000 ** (two_i / d_model))
         pe = torch.stack((pe_2i, pe_2i_1), 2).reshape(max_seq_len, d_model)
 
         self.embedding = nn.Embedding(max_seq_len, d_model)
@@ -30,7 +29,6 @@ class PositionalEncoding(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-
     def __init__(self, in_c: int, out_c: int):
         super().__init__()
         self.conv1 = nn.Conv2d(in_c, out_c, 3, 1, 1)
@@ -40,8 +38,9 @@ class ResidualBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_c)
         self.actvation2 = nn.ReLU()
         if in_c != out_c:
-            self.shortcut = nn.Sequential(nn.Conv2d(in_c, out_c, 1),
-                                          nn.BatchNorm2d(out_c))
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_c, out_c, 1), nn.BatchNorm2d(out_c)
+            )
         else:
             self.shortcut = nn.Identity()
 
@@ -57,12 +56,13 @@ class ResidualBlock(nn.Module):
 
 
 class ConvNet(nn.Module):
-
-    def __init__(self,
-                 n_steps,
-                 intermediate_channels=[10, 20, 40],
-                 pe_dim=10,
-                 insert_t_to_all_layers=False):
+    def __init__(
+        self,
+        n_steps,
+        intermediate_channels=[10, 20, 40],
+        pe_dim=10,
+        insert_t_to_all_layers=False,
+    ):
         super().__init__()
         C, H, W = get_img_shape()  # 1, 28, 28
         self.pe = PositionalEncoding(n_steps, pe_dim)
@@ -96,8 +96,13 @@ class ConvNet(nn.Module):
 
 
 class UnetBlock(nn.Module):
-
     def __init__(self, shape, in_c, out_c, residual=False):
+        """
+        The only dimension that changes is the channel dimension (from in_c to out_c). The height and width remain the same because:
+
+            Padding of 1 adds one pixel border around the image
+            Kernel size of 3 and stride of 1 maintain spatial dimensions when combined with padding of 1
+        """
         super().__init__()
         self.ln = nn.LayerNorm(shape)
         self.conv1 = nn.Conv2d(in_c, out_c, 3, 1, 1)
@@ -122,143 +127,204 @@ class UnetBlock(nn.Module):
 
 
 class UNet(nn.Module):
-
-    def __init__(self,
-                 n_steps,
-                 channels=[10, 20, 40, 80],
-                 pe_dim=10,
-                 residual=False) -> None:
+    def __init__(self, n_steps, channels=[10, 20, 40, 80], pe_dim=10, residual=False):
         super().__init__()
-        C, H, W = get_img_shape()   # (1, 28, 28)
-        layers = len(channels)
-        Hs = [H]
-        Ws = [W]
-        cH = H
-        cW = W
-        for _ in range(layers - 1):
+        self.channels = channels
+        C, H, W = get_img_shape()
+        self.initial_channels = C
+
+        # Calculate shapes for each level
+        self.shapes = self._calculate_shapes(H, W)
+
+        # Initialize components
+        self.pe = self._build_positional_encoding(n_steps, pe_dim)
+        self.encoder = self._build_encoder(pe_dim, residual)
+        self.middle_block = self._build_middle_block(pe_dim, residual)
+        self.decoder = self._build_decoder(pe_dim, residual)
+        self.projector = self._build_projector()
+
+    def _calculate_shapes(self, H, W):
+        shapes = [(H, W)]
+        cH, cW = H, W
+        for _ in range(len(self.channels) - 1):
             cH //= 2
             cW //= 2
-            Hs.append(cH)
-            Ws.append(cW)
+            shapes.append((cH, cW))
+        return shapes
 
-        self.pe = PositionalEncoding(n_steps, pe_dim)
+    def _build_positional_encoding(self, n_steps, pe_dim):
+        return PositionalEncoding(n_steps, pe_dim)
 
-        self.encoders = nn.ModuleList()
-        self.decoders = nn.ModuleList()
-        self.pe_linears_en = nn.ModuleList()
-        self.pe_linears_de = nn.ModuleList()
-        self.downs = nn.ModuleList()
-        self.ups = nn.ModuleList()
-        prev_channel = C
-        for channel, cH, cW in zip(channels[0:-1], Hs[0:-1], Ws[0:-1]):
-            self.pe_linears_en.append(
-                nn.Sequential(nn.Linear(pe_dim, prev_channel), nn.ReLU(),
-                              nn.Linear(prev_channel, prev_channel)))
-            self.encoders.append(
+    def _build_encoder(self, pe_dim, residual):
+        encoders = nn.ModuleList()
+        pe_linears = nn.ModuleList()
+        downs = nn.ModuleList()
+
+        prev_channel = self.initial_channels
+        for i, channel in enumerate(self.channels[:-1]):
+            # PE linear projection
+            pe_linears.append(
                 nn.Sequential(
-                    UnetBlock((prev_channel, cH, cW),
-                              prev_channel,
-                              channel,
-                              residual=residual),
-                    UnetBlock((channel, cH, cW),
-                              channel,
-                              channel,
-                              residual=residual)))
-            self.downs.append(nn.Conv2d(channel, channel, 2, 2))
+                    nn.Linear(pe_dim, prev_channel),
+                    nn.ReLU(),
+                    nn.Linear(prev_channel, prev_channel),
+                )
+            )
+
+            # Double convolution block
+            H, W = self.shapes[i]
+            encoders.append(
+                nn.Sequential(
+                    UnetBlock(
+                        (prev_channel, H, W), prev_channel, channel, residual=residual
+                    ),
+                    UnetBlock((channel, H, W), channel, channel, residual=residual),
+                )
+            )
+
+            # Downsampling
+            downs.append(nn.Conv2d(channel, channel, 2, 2))
             prev_channel = channel
 
-        self.pe_mid = nn.Linear(pe_dim, prev_channel)
-        channel = channels[-1]
-        self.mid = nn.Sequential(
-            UnetBlock((prev_channel, Hs[-1], Ws[-1]),
-                      prev_channel,
-                      channel,
-                      residual=residual),
-            UnetBlock((channel, Hs[-1], Ws[-1]),
-                      channel,
-                      channel,
-                      residual=residual),
+        return nn.ModuleDict(
+            {"encoders": encoders, "pe_linears": pe_linears, "downs": downs}
         )
-        prev_channel = channel
-        for channel, cH, cW in zip(channels[-2::-1], Hs[-2::-1], Ws[-2::-1]):
-            self.pe_linears_de.append(nn.Linear(pe_dim, prev_channel))
-            self.ups.append(nn.ConvTranspose2d(prev_channel, channel, 2, 2))
-            self.decoders.append(
-                nn.Sequential(
-                    UnetBlock((channel * 2, cH, cW),
-                              channel * 2,
-                              channel,
-                              residual=residual),
-                    UnetBlock((channel, cH, cW),
-                              channel,
-                              channel,
-                              residual=residual)))
 
+    def _build_middle_block(self, pe_dim, residual):
+        prev_channel = self.channels[-2]
+        channel = self.channels[-1]
+        H, W = self.shapes[-1]
+
+        return nn.ModuleDict(
+            {
+                "pe_linear": nn.Linear(pe_dim, prev_channel),
+                "block": nn.Sequential(
+                    UnetBlock(
+                        (prev_channel, H, W), prev_channel, channel, residual=residual
+                    ),
+                    UnetBlock((channel, H, W), channel, channel, residual=residual),
+                ),
+            }
+        )
+
+    def _build_decoder(self, pe_dim, residual):
+        decoders = nn.ModuleList()
+        pe_linears = nn.ModuleList()
+        ups = nn.ModuleList()
+
+        prev_channel = self.channels[-1]
+        for channel, (H, W) in zip(self.channels[-2::-1], self.shapes[-2::-1]):
+            pe_linears.append(nn.Linear(pe_dim, prev_channel))
+            ups.append(nn.ConvTranspose2d(prev_channel, channel, 2, 2))
+
+            decoders.append(
+                nn.Sequential(
+                    UnetBlock(
+                        (channel * 2, H, W), channel * 2, channel, residual=residual
+                    ),
+                    UnetBlock((channel, H, W), channel, channel, residual=residual),
+                )
+            )
             prev_channel = channel
 
-        self.conv_out = nn.Conv2d(prev_channel, C, 3, 1, 1)
+        return nn.ModuleDict(
+            {"decoders": decoders, "pe_linears": pe_linears, "ups": ups}
+        )
 
-    def forward(self, x, t):
+    def _build_projector(self):
+        return nn.Conv2d(self.channels[0], self.initial_channels, 3, 1, 1)
+
+    def encode(self, x, t):
         n = t.shape[0]
         t = self.pe(t)
+
         encoder_outs = []
-        for pe_linear, encoder, down in zip(self.pe_linears_en, self.encoders,
-                                            self.downs):
+        for pe_linear, encoder, down in zip(
+            self.encoder["pe_linears"], self.encoder["encoders"], self.encoder["downs"]
+        ):
             pe = pe_linear(t).reshape(n, -1, 1, 1)
             x = encoder(x + pe)
             encoder_outs.append(x)
             x = down(x)
-        pe = self.pe_mid(t).reshape(n, -1, 1, 1)
-        x = self.mid(x + pe)
-        for pe_linear, decoder, up, encoder_out in zip(self.pe_linears_de,
-                                                       self.decoders, self.ups,
-                                                       encoder_outs[::-1]):
+
+        return x, encoder_outs
+
+    def decode(self, x, encoder_outs, t):
+        n = t.shape[0]
+
+        for pe_linear, decoder, up, skip in zip(
+            self.decoder["pe_linears"],
+            self.decoder["decoders"],
+            self.decoder["ups"],
+            encoder_outs[::-1],
+        ):
             pe = pe_linear(t).reshape(n, -1, 1, 1)
             x = up(x)
 
-            pad_x = encoder_out.shape[2] - x.shape[2]
-            pad_y = encoder_out.shape[3] - x.shape[3]
-            x = F.pad(x, (pad_x // 2, pad_x - pad_x // 2, pad_y // 2,
-                          pad_y - pad_y // 2))
-            x = torch.cat((encoder_out, x), dim=1)
+            # Handle padding if needed
+            pad_x = skip.shape[2] - x.shape[2]
+            pad_y = skip.shape[3] - x.shape[3]
+            x = F.pad(
+                x, (pad_x // 2, pad_x - pad_x // 2, pad_y // 2, pad_y - pad_y // 2)
+            )
+
+            x = torch.cat((skip, x), dim=1)
             x = decoder(x + pe)
-        x = self.conv_out(x)
+
+        return x
+
+    def forward(self, x, t):
+        # Encoding path
+        x, encoder_outs = self.encode(x, t)
+
+        # Middle block
+        n = t.shape[0]
+        t = self.pe(t)
+        pe_mid = self.middle_block["pe_linear"](t).reshape(n, -1, 1, 1)
+        x = self.middle_block["block"](x + pe_mid)
+
+        # Decoding path
+        x = self.decode(x, encoder_outs, t)
+
+        # Final projection
+        x = self.projector(x)
+
         return x
 
 
 convnet_small_cfg = {
-    'type': 'ConvNet',
-    'intermediate_channels': [10, 20],
-    'pe_dim': 128
+    "type": "ConvNet",
+    "intermediate_channels": [10, 20],
+    "pe_dim": 128,
 }
 
 convnet_medium_cfg = {
-    'type': 'ConvNet',
-    'intermediate_channels': [10, 10, 20, 20, 40, 40, 80, 80],
-    'pe_dim': 256,
-    'insert_t_to_all_layers': True
+    "type": "ConvNet",
+    "intermediate_channels": [10, 10, 20, 20, 40, 40, 80, 80],
+    "pe_dim": 256,
+    "insert_t_to_all_layers": True,
 }
 convnet_big_cfg = {
-    'type': 'ConvNet',
-    'intermediate_channels': [20, 20, 40, 40, 80, 80, 160, 160],
-    'pe_dim': 256,
-    'insert_t_to_all_layers': True
+    "type": "ConvNet",
+    "intermediate_channels": [20, 20, 40, 40, 80, 80, 160, 160],
+    "pe_dim": 256,
+    "insert_t_to_all_layers": True,
 }
 
-unet_1_cfg = {'type': 'UNet', 'channels': [10, 20, 40, 80], 'pe_dim': 128}
+unet_1_cfg = {"type": "UNet", "channels": [10, 20, 40, 80], "pe_dim": 128}
 unet_res_cfg = {
-    'type': 'UNet',
-    'channels': [10, 20, 40, 80],
-    'pe_dim': 128,
-    'residual': True
+    "type": "UNet",
+    "channels": [10, 20, 40, 80],
+    "pe_dim": 128,
+    "residual": True,
 }
 
 
 def build_network(config: dict, n_steps):
-    network_type = config.pop('type')
-    if network_type == 'ConvNet':
+    network_type = config.pop("type")
+    if network_type == "ConvNet":
         network_cls = ConvNet
-    elif network_type == 'UNet':
+    elif network_type == "UNet":
         network_cls = UNet
 
     network = network_cls(n_steps, **config)
