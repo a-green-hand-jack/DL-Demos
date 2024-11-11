@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dldemos.ddpm.dataset import get_img_shape
+from .dataset import get_img_shape
 
 
 class PositionalEncoding(nn.Module):
@@ -129,7 +129,7 @@ class UNet(nn.Module):
                  pe_dim=10,
                  residual=False) -> None:
         super().__init__()
-        C, H, W = get_img_shape()
+        C, H, W = get_img_shape()   # (1, 28, 28)
         layers = len(channels)
         Hs = [H]
         Ws = [W]
